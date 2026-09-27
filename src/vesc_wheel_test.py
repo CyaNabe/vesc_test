@@ -27,7 +27,7 @@ from typing import Optional, Tuple
 # 設定パラメータ（実機に合わせてここを変更してください）
 # ==============================================================================
 CAN_CHANNEL = "can0"    # SocketCAN インターフェース名 (例: can0)
-BITRATE = 1000000       # CAN 通信速度 (1 Mbps)
+BITRATE = 500000        # CAN 通信速度 (500 kbps)
 
 TARGET_RPM = 500.0      # 目標速度 [機械角 RPM] (w/s でこの速度を送る)
 POLE_PAIRS = 7          # 極対数 (rox2026は14極モーター -> 極対数 7, ERPM = RPM * 7)
@@ -194,7 +194,7 @@ class CanManager:
                 print("  1. VESCの主電源はONになっていますか？（LED点灯を確認）")
                 print("  2. CAN_H と CAN_L の配線は正しいですか？（極性の逆接・断線・接触不良）")
                 print("  3. CANバスの両端に 120Ω の終端抵抗はありますか？")
-                print("  4. 通信速度（bitrate）は一致していますか？（VESC側設定と 1Mbps）")
+                print(f"  4. 通信速度（bitrate）は一致していますか？（VESC側設定と {BITRATE} bps）")
                 print("  5. SocketCANの送信キュー拡張 & 自動再起動コマンドを実行してください:")
                 print(f"       sudo ip link set {self.channel} down")
                 print(f"       sudo ip link set {self.channel} txqueuelen 1000")
