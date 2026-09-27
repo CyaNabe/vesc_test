@@ -44,11 +44,48 @@ MOTORS = [
 
 SEND_PERIOD_SEC = 0.05  # CAN送信周期 [秒] (20 Hz = 50 ms)
 KEY_TIMEOUT_SEC = 0.35  # キーを離したと判定して速度0にする時間 [秒]
-LOG_FILE = "logs/vesc_test.csv" # 走行データCSV保存先
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_DIR = os.path.dirname(SCRIPT_DIR)
+LOG_DIR = os.path.join(PROJECT_DIR, "logs")
+LOG_FILE = os.path.join(LOG_DIR, "vesc_test.csv") # 走行データCSV保存先
+CONSOLE_LOG_FILE = os.path.join(LOG_DIR, "terminal_run.log") # ターミナル表示の自動保存先
 
 
 # ==============================================================================
-# CAN 送受信ハンドラ (詳細エラー出力 & 確実送信)
+# ターミナル表示 & ファイル自動保存 (TeeLogger)
+# ==============================================================================
+class DualLogger:
+    """標準出力/標準エラー出力を端末画面とログファイルの両方に同時書き込みするクラス"""
+    def __init__(self, file_handle, stream):
+        self.stream = stream
+        self.file_handle = file_handle
+
+    def write(self, message):
+        self.stream.write(message)
+        self.stream.flush()
+        try:
+            self.file_handle.write(message)
+            self.file_handle.flush()
+        except Exception:
+            pass
+
+    def flush(self):
+        self.stream.flush()
+        try:
+            self.file_handle.flush()
+        except Exception:
+            pass
+
+    def fileno(self):
+        return self.stream.fileno()
+
+    def isatty(self):
+        return self.stream.isatty()
+
+
+# ==============================================================================
+# CAN 送受信ハンドラ (詳細エラー出力 & 確実送信 & ENOBUFS対策)
 # ==============================================================================
 class CanManager:
     def __init__(self, channel: str, bitrate: int, dry_run: bool = False):
@@ -57,6 +94,9 @@ class CanManager:
         self.mode = "none"
         self.bus = None
         self.sock = None
+        self.consecutive_errors = 0
+        self.last_error_time = 0.0
+        self.has_printed_enobufs_guide = False
 
         if self.dry_run:
             print(f"[CAN INIT] DRY-RUN (シミュレーション) モードで起動しました (実CAN送信なし)")
@@ -110,25 +150,63 @@ class CanManager:
             print(f"  [TX-DRY] 0x{controller_id:02X} ({label:<8}) | arb=0x{arb_id:03X} EXT | ERPM={erpm:+6d} | data=[{hex_data}]")
             return True
 
+        tx_ok = False
+        err_obj = None
+
         if self.mode == "python-can":
             import can
             msg = can.Message(arbitration_id=arb_id, data=data, is_extended_id=True)
             try:
                 self.bus.send(msg, timeout=0.05)
-                return True
+                tx_ok = True
             except Exception as e:
-                print(f"\n[CAN TX エラー] 0x{controller_id:02X} ({label}) 送信失敗: {type(e).__name__}: {e}")
-                return False
+                err_obj = e
         elif self.mode == "socketcan":
             can_id = arb_id | 0x80000000  # CAN_EFF_FLAG
             frame = struct.pack("=IB3x8s", can_id, 4, data.ljust(8, b"\x00"))
             try:
                 self.sock.send(frame)
-                return True
+                tx_ok = True
             except Exception as e:
-                print(f"\n[CAN TX エラー] 0x{controller_id:02X} ({label}) 送信失敗: {type(e).__name__}: {e}")
-                return False
-        return False
+                err_obj = e
+
+        if tx_ok:
+            if self.consecutive_errors > 0:
+                print(f"\n[CAN TX 復旧] CANパケット送信が正常に復帰しました (直前のエラー回数: {self.consecutive_errors}回)\n")
+                self.consecutive_errors = 0
+                self.has_printed_enobufs_guide = False
+            return True
+        else:
+            self.consecutive_errors += 1
+            now = time.monotonic()
+            err_str = str(err_obj)
+            is_enobufs = "105" in err_str or "No buffer space" in err_str or "ENOBUFS" in err_str
+
+            # ENOBUFS の初回発生時に原因と対処手順を大きく表示
+            if is_enobufs and not self.has_printed_enobufs_guide:
+                self.has_printed_enobufs_guide = True
+                print("\n" + "!" * 70)
+                print("[CAN TX 致命的エラー: ENOBUFS (Error Code 105: No buffer space available)]")
+                print("【原因】CANコントローラの送信バッファが満杯です！")
+                print("  CANバス上にACK（受信確認）を返す相手機器（VESC）が1台もいないため、")
+                print("  ハードウェアが再送を繰り返し、OSの送信キューが一瞬で詰まっています。")
+                print("【確認・対処チェックリスト】")
+                print("  1. VESCの主電源はONになっていますか？（LED点灯を確認）")
+                print("  2. CAN_H と CAN_L の配線は正しいですか？（極性の逆接・断線・接触不良）")
+                print("  3. CANバスの両端に 120Ω の終端抵抗はありますか？")
+                print("  4. 通信速度（bitrate）は一致していますか？（VESC側設定と 1Mbps）")
+                print("  5. SocketCANの送信キュー拡張 & 自動再起動コマンドを実行してください:")
+                print(f"       sudo ip link set {self.channel} down")
+                print(f"       sudo ip link set {self.channel} txqueuelen 1000")
+                print(f"       sudo ip link set {self.channel} up type can bitrate {BITRATE} restart-ms 100")
+                print("!" * 70 + "\n")
+
+            # ログの画面埋め尽くしを防ぐため、エラー表示は2秒に1回、または初回のみに制限
+            if self.consecutive_errors == 1 or (now - self.last_error_time) >= 2.0:
+                print(f"[CAN TX エラー] 0x{controller_id:02X} ({label}) 送信失敗: {type(err_obj).__name__}: {err_obj} (累積失敗: {self.consecutive_errors}回)")
+                self.last_error_time = now
+
+            return False
 
     def recv(self) -> Optional[Tuple[int, bool, bytes]]:
         """受信バッファから1フレーム取得: (arb_id, is_extended, data_bytes)"""
@@ -172,11 +250,21 @@ class CanManager:
 # メイン処理
 # ==============================================================================
 def main():
+    # 端末出力ログの自動ファイル記録を開始
+    os.makedirs(os.path.dirname(CONSOLE_LOG_FILE) or ".", exist_ok=True)
+    f_console = open(CONSOLE_LOG_FILE, "w", encoding="utf-8", buffering=1)
+    orig_stdout = sys.stdout
+    orig_stderr = sys.stderr
+    sys.stdout = DualLogger(f_console, orig_stdout)
+    sys.stderr = DualLogger(f_console, orig_stderr)
+
     print("=" * 70)
     print(" VESC 4-Wheel Drive Motor Test (確実送信 & 詳細ログ版)")
     print("=" * 70)
     print(f" CAN Channel : {CAN_CHANNEL}")
     print(f" Target Speed: {TARGET_RPM:.0f} RPM (ERPM: {int(TARGET_RPM * POLE_PAIRS)})")
+    print(f" CSV Log     : {LOG_FILE} (走行データCSV)")
+    print(f" Terminal Log: {CONSOLE_LOG_FILE} (ターミナル出力の自動保存先)")
     print(" Motors:")
     for m in MOTORS:
         dir_str = "正転(+1)" if m["dir"] > 0 else "反転(-1)"
@@ -365,9 +453,15 @@ def main():
         f_log.close()
         if old_term is not None:
             termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old_term)
-        print(f"[終了処理] 走行ログ保存完了: {LOG_FILE}")
+        print(f"[終了処理] 走行データCSV保存完了   : {LOG_FILE}")
+        print(f"[終了処理] ターミナル出力ログ保存完了: {CONSOLE_LOG_FILE}")
         print("[終了処理] モーターを停止し、安全に終了しました。")
         print("=" * 70 + "\n")
+
+        # 端末出力を元に戻してファイルクローズ
+        sys.stdout = orig_stdout
+        sys.stderr = orig_stderr
+        f_console.close()
 
 
 if __name__ == "__main__":

@@ -22,10 +22,10 @@ import numpy as np
 
 # 日本語フォント設定
 matplotlib.rcParams["font.family"] = ["IPAexGothic", "Noto Sans CJK JP", "IPAGothic", "DejaVu Sans"]
-matplotlib.rcParams["axes.unicode_minus"] = False
-
-DEFAULT_LOG = "logs/vesc_test.csv"
-OUTPUT_PLOT = "logs/vesc_test_plot.png"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_DIR = os.path.dirname(SCRIPT_DIR)
+DEFAULT_LOG = os.path.join(PROJECT_DIR, "logs", "vesc_test.csv")
+OUTPUT_PLOT = os.path.join(PROJECT_DIR, "logs", "vesc_test_plot.png")
 
 
 def main():
