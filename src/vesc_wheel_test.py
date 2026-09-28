@@ -29,8 +29,8 @@ from typing import Optional, Tuple
 CAN_CHANNEL = "can0"    # SocketCAN インターフェース名 (例: can0)
 BITRATE = 500000        # CAN 通信速度 (500 kbps)
 
-TARGET_RPM = 500.0      # 目標速度 [機械角 RPM] (w/s でこの速度を送る)
-POLE_PAIRS = 7          # 極対数 (rox2026は14極モーター -> 極対数 7, ERPM = RPM * 7)
+TARGET_RPM = 1000.0     # 目標速度 [機械角 RPM] (w/s でこの速度を送る。--rpm 引数でも変更可能)
+POLE_PAIRS = 7          # 極対数 (14極モーター -> 7, ERPM = RPM * 7。直接ERPM指定したい場合は 1)
 WHEEL_RADIUS = 0.075    # 車輪半径 [m] (加速度計算用: 75mm)
 
 # 4つの足回りモーター設定 (IDと前進時の回転方向)
@@ -42,7 +42,7 @@ MOTORS = [
     {"name": "RR (右後)", "id": 0x3, "dir": -1},
 ]
 
-SEND_PERIOD_SEC = 0.05  # CAN送信周期 [秒] (20 Hz = 50 ms)
+SEND_PERIOD_SEC = 0.02  # CAN送信周期 [秒] (50 Hz = 20 ms, VESC公式ドキュメント推奨)
 KEY_TIMEOUT_SEC = 0.35  # キーを離したと判定して速度0にする時間 [秒]
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -258,11 +258,23 @@ def main():
     sys.stdout = DualLogger(f_console, orig_stdout)
     sys.stderr = DualLogger(f_console, orig_stderr)
 
+    dry_run = "--dry-run" in sys.argv
+    channel = CAN_CHANNEL
+    target_rpm = TARGET_RPM
+    for i, arg in enumerate(sys.argv):
+        if arg == "--channel" and i + 1 < len(sys.argv):
+            channel = sys.argv[i + 1]
+        elif arg == "--rpm" and i + 1 < len(sys.argv):
+            try:
+                target_rpm = float(sys.argv[i + 1])
+            except ValueError:
+                pass
+
     print("=" * 70)
     print(" VESC 4-Wheel Drive Motor Test (確実送信 & 詳細ログ版)")
     print("=" * 70)
-    print(f" CAN Channel : {CAN_CHANNEL}")
-    print(f" Target Speed: {TARGET_RPM:.0f} RPM (ERPM: {int(TARGET_RPM * POLE_PAIRS)})")
+    print(f" CAN Channel : {channel}")
+    print(f" Target Speed: {target_rpm:.0f} RPM (ERPM: {int(target_rpm * POLE_PAIRS)})")
     print(f" CSV Log     : {LOG_FILE} (走行データCSV)")
     print(f" Terminal Log: {CONSOLE_LOG_FILE} (ターミナル出力の自動保存先)")
     print(" Motors:")
@@ -276,12 +288,6 @@ def main():
     print("   キーを離す   : 自動停止 (速度0送信)")
     print("   [q] / Ctrl+C : 終了 (全モーター停止)")
     print("=" * 70)
-
-    dry_run = "--dry-run" in sys.argv
-    channel = CAN_CHANNEL
-    for i, arg in enumerate(sys.argv):
-        if arg == "--channel" and i + 1 < len(sys.argv):
-            channel = sys.argv[i + 1]
 
     # CAN初期化
     can = CanManager(channel, BITRATE, dry_run=dry_run)
@@ -357,12 +363,12 @@ def main():
                     break
                 elif char.lower() == "w":
                     if state != "FORWARD":
-                        print(f"\n[KEY EVENT] 'w' 検知 -> 【前進開始】 目標速度: +{TARGET_RPM:.0f} RPM")
+                        print(f"\n[KEY EVENT] 'w' 検知 -> 【前進開始】 目標速度: +{target_rpm:.0f} RPM")
                     state = "FORWARD"
                     last_key_time = t_now
                 elif char.lower() == "s":
                     if state != "REVERSE":
-                        print(f"\n[KEY EVENT] 's' 検知 -> 【後進開始】 目標速度: -{TARGET_RPM:.0f} RPM")
+                        print(f"\n[KEY EVENT] 's' 検知 -> 【後進開始】 目標速度: -{target_rpm:.0f} RPM")
                     state = "REVERSE"
                     last_key_time = t_now
                 elif char in (" ", "x", "X"):
@@ -413,9 +419,9 @@ def main():
             cmd_rpms = {}
             for m in MOTORS:
                 if state == "FORWARD":
-                    cmd = TARGET_RPM * m["dir"]
+                    cmd = target_rpm * m["dir"]
                 elif state == "REVERSE":
-                    cmd = -TARGET_RPM * m["dir"]
+                    cmd = -target_rpm * m["dir"]
                 else:
                     cmd = 0.0
                 cmd_rpms[m["id"]] = cmd
@@ -423,7 +429,7 @@ def main():
                 can.send_rpm(m["id"], erpm, m["name"])
 
             # 5. CSVログ保存
-            row = [f"{t_elapsed:.3f}", state, f"{TARGET_RPM:.0f}"]
+            row = [f"{t_elapsed:.3f}", state, f"{target_rpm:.0f}"]
             for m in MOTORS:
                 st = motor_state[m["id"]]
                 row.extend([f"{cmd_rpms[m['id']]:.0f}", f"{st['real_rpm']:.0f}", f"{st['current']:.1f}", f"{st['accel']:.2f}"])
