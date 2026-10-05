@@ -27,7 +27,7 @@ from typing import Optional, Tuple
 # 設定パラメータ（実機に合わせてここを変更してください）
 # ==============================================================================
 CAN_CHANNEL = "can0"    # SocketCAN インターフェース名 (例: can0)
-BITRATE = 500000        # CAN 通信速度 (500 kbps)
+BITRATE = 1000000        # CAN 通信速度 (500 kbps)
 
 TARGET_RPM = 5000.0     # 目標速度 [機械角 RPM] (w/s でこの速度を送る。--rpm 引数でも変更可能)
 POLE_PAIRS = 7          # 極対数 (14極モーター -> 7, ERPM = RPM * 7。直接ERPM指定したい場合は 1)
