@@ -4,9 +4,9 @@ VESC 4-Wheel Drive Motor Speed Test (Clear Logging & Verified Transmission)
 4輪足回り VESC モーター速度制御テスト (確実送信 & 詳細ログ版)
 
 操作:
-  'w' 押し続け : 前進 (直進)
-  's' 押し続け : 後進 (直進)
-  離すと自動停止 (速度0)
+  'w'          : 前進 (トグル)
+  's'          : 後進 (トグル)
+  Space / 'x'  : 停止 (速度0)
   'q' / Ctrl+C : 終了 (全モーター停止)
 """
 
@@ -30,20 +30,24 @@ CAN_CHANNEL = "can0"    # SocketCAN インターフェース名 (例: can0)
 BITRATE = 1000000        # CAN 通信速度 (500 kbps)
 
 TARGET_RPM = 5000.0     # 目標速度 [機械角 RPM] (w/s でこの速度を送る。--rpm 引数でも変更可能)
-POLE_PAIRS = 7          # 極対数 (14極モーター -> 7, ERPM = RPM * 7。直接ERPM指定したい場合は 1)
+POLE_PAIRS = 8          # 極対数 (14極モーター -> 7, ERPM = RPM * 7。直接ERPM指定したい場合は 1)
 WHEEL_RADIUS = 0.03    # 車輪半径 [m] (加速度計算用: 75mm)
 
 # 4つの足回りモーター設定 (IDと前進時の回転方向)
 # 車体が直進するように、左右で回転方向の符号を逆に設定 (+1: 正転, -1: 逆転)
 MOTORS = [
-    {"name": "FL (左前)", "id": 0x1, "dir":  1},
+    {"name": "FL (左前)", "id": 0x0, "dir":  1},
     {"name": "RL (左後)", "id": 0x2, "dir":  1},
-    {"name": "FR (右前)", "id": 0x0, "dir": -1},
+    {"name": "FR (右前)", "id": 0x1, "dir": -1},
     {"name": "RR (右後)", "id": 0x3, "dir": -1},
 ]
 
 SEND_PERIOD_SEC = 0.01  # CAN送信周期 [秒] (50 Hz = 20 ms, VESC公式ドキュメント推奨)
 KEY_TIMEOUT_SEC = 0.05  # キーを離したと判定して速度0にする時間 [秒]
+
+# ブレーキ設定
+DEFAULT_BRAKE_MODE = "CURRENT_BRAKE"  # "HANDBRAKE" (固定ロック・最強), "CURRENT_BRAKE" (回生ブレーキ), "RPM_ZERO" (速度0制御)
+DEFAULT_BRAKE_CURRENT = 10.0      # ブレーキ電流 [A] (HANDBRAKE または CURRENT_BRAKE で使用)
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(SCRIPT_DIR)
@@ -140,14 +144,13 @@ class CanManager:
             print("=" * 70 + "\n")
             sys.exit(1)
 
-    def send_rpm(self, controller_id: int, erpm: int, label: str = "") -> bool:
-        """VESCへ PACKET_SET_RPM = 3 (Extended ID: (3 << 8) | controller_id) を送信"""
-        arb_id = (3 << 8) | (controller_id & 0xFF)
-        data = int(erpm).to_bytes(4, byteorder="big", signed=True)
+    def _send_packet(self, controller_id: int, arb_id: int, data: bytes, label: str, log_info: str) -> bool:
+        """CANフレーム送信共通処理 (Extended ID 送信)"""
         hex_data = " ".join(f"{b:02X}" for b in data)
+        tag = "TX-DRY" if self.dry_run else "TX"
+        print(f"  [{tag}] 0x{controller_id:02X} ({label:<8}) | arb=0x{arb_id:03X} EXT | {log_info} | data=[{hex_data}]")
 
         if self.dry_run:
-            print(f"  [TX-DRY] 0x{controller_id:02X} ({label:<8}) | arb=0x{arb_id:03X} EXT | ERPM={erpm:+6d} | data=[{hex_data}]")
             return True
 
         tx_ok = False
@@ -208,6 +211,39 @@ class CanManager:
 
             return False
 
+    def send_rpm(self, controller_id: int, erpm: int, label: str = "") -> bool:
+        """VESCへ CAN_PACKET_SET_RPM = 3 (Extended ID: (3 << 8) | controller_id) を送信"""
+        arb_id = (3 << 8) | (controller_id & 0xFF)
+        data = int(erpm).to_bytes(4, byteorder="big", signed=True)
+        rpm = erpm / POLE_PAIRS if POLE_PAIRS != 0 else erpm
+        log_info = f"送信速度: {rpm:+7.0f} RPM (ERPM: {erpm:+6d})"
+        return self._send_packet(controller_id, arb_id, data, label, log_info)
+
+    def send_current_brake(self, controller_id: int, current: float, label: str = "") -> bool:
+        """VESCへ CAN_PACKET_SET_CURRENT_BRAKE = 2 (回生ブレーキ) を送信 (current [A], scale: 1000)"""
+        arb_id = (2 << 8) | (controller_id & 0xFF)
+        data = int(round(current * 1000.0)).to_bytes(4, byteorder="big", signed=True)
+        log_info = f"回生ブレーキ: {current:+6.1f} A"
+        return self._send_packet(controller_id, arb_id, data, label, log_info)
+
+    def send_handbrake(self, controller_id: int, current: float, label: str = "") -> bool:
+        """VESCへ CAN_PACKET_SET_CURRENT_HANDBRAKE = 12 (ハンドブレーキ/固定ロック) を送信 (current [A], scale: 1000)"""
+        arb_id = (12 << 8) | (controller_id & 0xFF)
+        data = int(round(current * 1000.0)).to_bytes(4, byteorder="big", signed=True)
+        log_info = f"ハンドブレーキ(ロック): {current:+6.1f} A"
+        return self._send_packet(controller_id, arb_id, data, label, log_info)
+
+    def send_brake(self, controller_id: int, current: float, mode: str = "HANDBRAKE", label: str = "") -> bool:
+        """指定されたブレーキモードでブレーキコマンドを送信"""
+        if mode.upper() == "HANDBRAKE":
+            return self.send_handbrake(controller_id, current, label)
+        elif mode.upper() == "CURRENT_BRAKE":
+            return self.send_current_brake(controller_id, current, label)
+        elif mode.upper() == "RPM_ZERO":
+            return self.send_rpm(controller_id, 0, label)
+        else:
+            return self.send_handbrake(controller_id, current, label)
+
     def recv(self) -> Optional[Tuple[int, bool, bytes]]:
         """受信バッファから1フレーム取得: (arb_id, is_extended, data_bytes)"""
         if self.dry_run:
@@ -261,6 +297,8 @@ def main():
     dry_run = "--dry-run" in sys.argv
     channel = CAN_CHANNEL
     target_rpm = TARGET_RPM
+    brake_mode = DEFAULT_BRAKE_MODE
+    brake_current = DEFAULT_BRAKE_CURRENT
     for i, arg in enumerate(sys.argv):
         if arg == "--channel" and i + 1 < len(sys.argv):
             channel = sys.argv[i + 1]
@@ -269,12 +307,20 @@ def main():
                 target_rpm = float(sys.argv[i + 1])
             except ValueError:
                 pass
+        elif arg == "--brake-mode" and i + 1 < len(sys.argv):
+            brake_mode = sys.argv[i + 1].upper()
+        elif arg == "--brake-current" and i + 1 < len(sys.argv):
+            try:
+                brake_current = float(sys.argv[i + 1])
+            except ValueError:
+                pass
 
     print("=" * 70)
     print(" VESC 4-Wheel Drive Motor Test (確実送信 & 詳細ログ版)")
     print("=" * 70)
     print(f" CAN Channel : {channel}")
     print(f" Target Speed: {target_rpm:.0f} RPM (ERPM: {int(target_rpm * POLE_PAIRS)})")
+    print(f" Brake Mode  : {brake_mode} ({brake_current:.1f} A)")
     print(f" CSV Log     : {LOG_FILE} (走行データCSV)")
     print(f" Terminal Log: {CONSOLE_LOG_FILE} (ターミナル出力の自動保存先)")
     print(" Motors:")
@@ -283,9 +329,9 @@ def main():
         print(f"   - {m['name']:<12} ID: 0x{m['id']:02X} ({m['id']:3d}) | {dir_str}")
     print("-" * 70)
     print(" 操作方法:")
-    print("   [w] 押し続け : 前進 (直進)")
-    print("   [s] 押し続け : 後進 (直進)")
-    print("   キーを離す   : 自動停止 (速度0送信)")
+    print("   [w]          : 前進 (トグル)")
+    print("   [s]          : 後進 (トグル)")
+    print(f"   [Space] / [x]: 停止 (ブレーキ: {brake_mode} {brake_current:.1f}A)")
     print("   [q] / Ctrl+C : 終了 (全モーター停止)")
     print("=" * 70)
 
@@ -341,13 +387,17 @@ def main():
             erpm = int(round(cmd * POLE_PAIRS))
             can.send_rpm(m["id"], erpm, m["name"])
 
+    def send_all_brake(current: float, mode: str = "HANDBRAKE"):
+        for m in MOTORS:
+            can.send_brake(m["id"], current, mode=mode, label=m["name"])
+
     state = "STOP"
     prev_state = None
     last_key_time = 0.0
     start_time = time.monotonic()
     last_log_print_time = 0.0
 
-    print("キー入力待機中... ('w'=前進, 's'=後進, 'q'=終了)")
+    print("キー入力待機中... ('w'=前進, 's'=後進, Space/'x'=停止, 'q'=終了)")
 
     try:
         while True:
@@ -377,11 +427,11 @@ def main():
                     state = "STOP"
                     last_key_time = 0.0
 
-            # 2. デッドマンタイムアウト (キーを離したら自動停止)
-            if state in ("FORWARD", "REVERSE"):
-                if (t_now - last_key_time) > KEY_TIMEOUT_SEC:
-                    print(f"\n[DEADMAN] キー入力途絶 (離した) -> 【自動停止】 速度0")
-                    state = "STOP"
+            # 2. デッドマンタイムアウト (トグル方式のため無効化)
+            # if state in ("FORWARD", "REVERSE"):
+            #     if (t_now - last_key_time) > KEY_TIMEOUT_SEC:
+            #         print(f"\n[DEADMAN] キー入力途絶 (離した) -> 【自動停止】 速度0")
+            #         state = "STOP"
 
             # 3. CAN受信処理 (VESC STATUSフレーム: 0x900 | id)
             while True:
@@ -415,18 +465,23 @@ def main():
                         st["real_rpm"] = real_rpm
                         st["current"] = cur_raw / 10.0
 
-            # 4. 指令送信 (4輪へ同時にSET_RPM送信)
+            # 4. 指令送信 (前進/後進時はSET_RPM、停止時はブレーキ送信)
             cmd_rpms = {}
             for m in MOTORS:
                 if state == "FORWARD":
                     cmd = target_rpm * m["dir"]
+                    cmd_rpms[m["id"]] = cmd
+                    erpm = int(round(cmd * POLE_PAIRS))
+                    can.send_rpm(m["id"], erpm, m["name"])
                 elif state == "REVERSE":
                     cmd = -target_rpm * m["dir"]
+                    cmd_rpms[m["id"]] = cmd
+                    erpm = int(round(cmd * POLE_PAIRS))
+                    can.send_rpm(m["id"], erpm, m["name"])
                 else:
                     cmd = 0.0
-                cmd_rpms[m["id"]] = cmd
-                erpm = int(round(cmd * POLE_PAIRS))
-                can.send_rpm(m["id"], erpm, m["name"])
+                    cmd_rpms[m["id"]] = cmd
+                    can.send_brake(m["id"], brake_current, mode=brake_mode, label=m["name"])
 
             # 5. CSVログ保存
             row = [f"{t_elapsed:.3f}", state, f"{target_rpm:.0f}"]
@@ -442,7 +497,11 @@ def main():
                 status_parts = []
                 for m in MOTORS:
                     st = motor_state[m["id"]]
-                    status_parts.append(f"{m['name']}: 指令{cmd_rpms[m['id']]:+5.0f} / 実測{st['real_rpm']:+5.0f}rpm ({st['accel']:+5.2f}m/s²)")
+                    if state == "STOP":
+                        cmd_str = f"ブレーキ({brake_mode}:{brake_current:.0f}A)"
+                    else:
+                        cmd_str = f"指令{cmd_rpms[m['id']]:+5.0f}"
+                    status_parts.append(f"{m['name']}: {cmd_str} / 実測{st['real_rpm']:+5.0f}rpm ({st['accel']:+5.2f}m/s²)")
                 print(f"[{t_elapsed:5.1f}s][{state:<7}] " + " | ".join(status_parts))
 
             time.sleep(SEND_PERIOD_SEC)
@@ -451,9 +510,9 @@ def main():
         print("\n[USER] Ctrl+C が検出されました。")
     finally:
         print("\n" + "=" * 70)
-        print("[終了処理] 全モーターへ速度0 (STOP) を送信中...")
+        print(f"[終了処理] 全モーターへブレーキ ({brake_mode}: {brake_current:.1f}A) を送信中...")
         for _ in range(5):
-            send_all_rpms(0.0)
+            send_all_brake(brake_current, mode=brake_mode)
             time.sleep(0.02)
         can.close()
         f_log.close()
