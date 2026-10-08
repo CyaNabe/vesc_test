@@ -30,7 +30,7 @@ CAN_CHANNEL = "can0"    # SocketCAN インターフェース名 (例: can0)
 BITRATE = 1000000        # CAN 通信速度 (500 kbps)
 
 TARGET_RPM = 5000.0     # 目標速度 [機械角 RPM] (w/s でこの速度を送る。--rpm 引数でも変更可能)
-POLE_PAIRS = 8          # 極対数 (14極モーター -> 7, ERPM = RPM * 7。直接ERPM指定したい場合は 1)
+POLE_PAIRS = 7          # 極対数 (14極モーター -> 7, ERPM = RPM * 7。直接ERPM指定したい場合は 1)
 WHEEL_RADIUS = 0.03    # 車輪半径 [m] (加速度計算用: 75mm)
 
 # 4つの足回りモーター設定 (IDと前進時の回転方向)
